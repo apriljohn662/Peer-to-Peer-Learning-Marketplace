@@ -10,6 +10,9 @@
 (define-constant ERR_SESSION_EXPIRED (err u1006))
 (define-constant ERR_INVALID_RATING (err u1007))
 (define-constant ERR_PAYMENT_FAILED (err u1008))
+(define-constant ERR_SPECIALIZATION_EXISTS (err u1009))
+(define-constant ERR_SPECIALIZATION_NOT_FOUND (err u1010))
+(define-constant ERR_SPECIALIZATION_NOT_VERIFIED (err u1011))
 
 (define-data-var next-session-id uint u1)
 (define-data-var platform-fee-percent uint u5)
@@ -56,6 +59,13 @@
     tutor-review: (optional (string-ascii 200))
 })
 
+(define-map tutor-specializations {tutor: principal, subject: (string-ascii 30)} {
+    rating: uint,
+    total-sessions: uint,
+    is-verified: bool,
+    certification-date: uint
+})
+
 (define-public (register-tutor (name (string-ascii 50)) (subject (string-ascii 30)) (hourly-rate uint))
     (let ((tutor-data (map-get? tutors tx-sender)))
         (if (is-some tutor-data)
@@ -87,6 +97,50 @@
                 })
                 (ok true)
             )
+        )
+    )
+)
+
+(define-public (add-specialization (subject (string-ascii 30)))
+    (let (
+        (tutor-data (unwrap! (map-get? tutors tx-sender) ERR_NOT_REGISTERED))
+        (existing (map-get? tutor-specializations {tutor: tx-sender, subject: subject}))
+    )
+        (if (is-none existing)
+            (begin
+                (map-set tutor-specializations {tutor: tx-sender, subject: subject} {
+                    rating: u5,
+                    total-sessions: u0,
+                    is-verified: false,
+                    certification-date: u0
+                })
+                (ok true)
+            )
+            ERR_SPECIALIZATION_EXISTS
+        )
+    )
+)
+
+(define-public (verify-specialization (tutor principal) (subject (string-ascii 30)))
+    (if (is-eq tx-sender CONTRACT_OWNER)
+        (let ((specialization (unwrap! (map-get? tutor-specializations {tutor: tutor, subject: subject}) ERR_SPECIALIZATION_NOT_FOUND)))
+            (begin
+                (map-set tutor-specializations {tutor: tutor, subject: subject} (merge specialization {
+                    is-verified: true,
+                    certification-date: stacks-block-height
+                }))
+                (ok true)
+            )
+        )
+        ERR_NOT_AUTHORIZED
+    )
+)
+
+(define-public (remove-specialization (subject (string-ascii 30)))
+    (let ((specialization (unwrap! (map-get? tutor-specializations {tutor: tx-sender, subject: subject}) ERR_SPECIALIZATION_NOT_FOUND)))
+        (begin
+            (map-delete tutor-specializations {tutor: tx-sender, subject: subject})
+            (ok true)
         )
     )
 )
@@ -224,6 +278,39 @@
                         )
                         ERR_NOT_AUTHORIZED
                     )
+                )
+                ERR_INVALID_STATUS
+            )
+            ERR_INVALID_RATING
+        )
+    )
+)
+
+(define-public (rate-session-by-subject (session-id uint) (subject (string-ascii 30)) (rating uint) (review (string-ascii 200)))
+    (let (
+        (session-data (unwrap! (map-get? sessions session-id) ERR_SESSION_NOT_FOUND))
+        (specialization (unwrap! (map-get? tutor-specializations {tutor: (get tutor session-data), subject: subject}) ERR_SPECIALIZATION_NOT_FOUND))
+    )
+        (if (and (>= rating u1) (<= rating u5))
+            (if (is-eq (get status session-data) "completed")
+                (if (is-eq (get student session-data) tx-sender)
+                    (let (
+                        (current-rating (get rating specialization))
+                        (current-sessions (get total-sessions specialization))
+                        (new-avg-rating (if (> current-sessions u0)
+                            (/ (+ (* current-rating current-sessions) rating) (+ current-sessions u1))
+                            rating
+                        ))
+                    )
+                        (begin
+                            (map-set tutor-specializations {tutor: (get tutor session-data), subject: subject} (merge specialization {
+                                rating: new-avg-rating,
+                                total-sessions: (+ current-sessions u1)
+                            }))
+                            (ok true)
+                        )
+                    )
+                    ERR_NOT_AUTHORIZED
                 )
                 ERR_INVALID_STATUS
             )
@@ -372,6 +459,10 @@
 
 (define-read-only (get-next-session-id)
     (var-get next-session-id)
+)
+
+(define-read-only (get-tutor-specialization (tutor principal) (subject (string-ascii 30)))
+    (map-get? tutor-specializations {tutor: tutor, subject: subject})
 )
 
 (define-read-only (calculate-session-cost (duration uint) (hourly-rate uint))
