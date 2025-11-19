@@ -10,9 +10,34 @@
 (define-constant ERR_SESSION_EXPIRED (err u1006))
 (define-constant ERR_INVALID_RATING (err u1007))
 (define-constant ERR_PAYMENT_FAILED (err u1008))
+(define-constant ERR_NO_AVAILABLE_SLOTS (err u1012))
+(define-constant ERR_SLOT_FULL (err u1013))
+(define-constant ERR_SLOT_NOT_FOUND (err u1014))
+(define-constant ERR_INVALID_TIME_RANGE (err u1015))
 
 (define-data-var next-session-id uint u1)
 (define-data-var platform-fee-percent uint u5)
+(define-data-var next-slot-id uint u1)
+
+(define-map tutor-slots uint {
+    tutor: principal,
+    subject: (string-ascii 30),
+    start-block: uint,
+    duration: uint,
+    capacity: uint,
+    is-active: bool,
+    is-recurring: bool,
+    recurrence-interval: uint
+})
+
+(define-map slot-occurrence-bookings {slot-id: uint, occurrence-start: uint} {
+    booked: uint
+})
+
+(define-map session-slots uint {
+    slot-id: uint,
+    occurrence-start: uint
+})
 
 (define-map tutors principal {
     name: (string-ascii 50),
@@ -99,6 +124,8 @@
         (hourly-rate (get hourly-rate tutor-data))
         (total-cost (* duration hourly-rate))
         (platform-fee (/ (* total-cost (var-get platform-fee-percent)) u100))
+        (slot-id u0)
+        (occurrence-start starts-at)
     )
         (if (>= (stx-get-balance tx-sender) (+ total-cost platform-fee))
             (begin
@@ -114,6 +141,10 @@
                     created-at: stacks-block-height,
                     starts-at: starts-at,
                     completed-at: none
+                })
+                (map-set session-slots session-id {
+                    slot-id: slot-id,
+                    occurrence-start: occurrence-start
                 })
                 (map-set session-payments session-id {
                     amount: total-cost,
@@ -346,6 +377,65 @@
     )
 )
 
+(define-public (create-availability-slot (subject (string-ascii 30)) (start-block uint) (duration uint) (capacity uint) (is-recurring bool) (recurrence-interval uint))
+    (let (
+        (tutor-data (unwrap! (map-get? tutors tx-sender) ERR_NOT_REGISTERED))
+        (slot-id (var-get next-slot-id))
+    )
+        (if (> capacity u0)
+            (begin
+                (map-set tutor-slots slot-id {
+                    tutor: tx-sender,
+                    subject: subject,
+                    start-block: start-block,
+                    duration: duration,
+                    capacity: capacity,
+                    is-active: true,
+                    is-recurring: is-recurring,
+                    recurrence-interval: recurrence-interval
+                })
+                (var-set next-slot-id (+ slot-id u1))
+                (ok slot-id)
+            )
+            ERR_INVALID_TIME_RANGE
+        )
+    )
+)
+
+(define-public (toggle-slot-active (slot-id uint) (is-active bool))
+    (let ((slot-data (unwrap! (map-get? tutor-slots slot-id) ERR_SLOT_NOT_FOUND)))
+        (if (is-eq (get tutor slot-data) tx-sender)
+            (begin
+                (map-set tutor-slots slot-id (merge slot-data { is-active: is-active }))
+                (ok true)
+            )
+            ERR_NOT_AUTHORIZED
+        )
+    )
+)
+
+(define-public (remove-availability-slot (slot-id uint))
+    (let ((slot-data (unwrap! (map-get? tutor-slots slot-id) ERR_SLOT_NOT_FOUND)))
+        (if (is-eq (get tutor slot-data) tx-sender)
+            (begin
+                (map-delete tutor-slots slot-id)
+                (ok true)
+            )
+            ERR_NOT_AUTHORIZED
+        )
+    )
+)
+
+(define-private (book-slot-occurrence (slot-id uint) (occurrence-start uint))
+    (let (
+        (booking-entry (default-to { booked: u0 } (map-get? slot-occurrence-bookings { slot-id: slot-id, occurrence-start: occurrence-start })))
+        (current-booked (get booked booking-entry))
+    )
+        (map-set slot-occurrence-bookings { slot-id: slot-id, occurrence-start: occurrence-start } { booked: (+ current-booked u1) })
+        (ok true)
+    )
+)
+
 (define-read-only (get-tutor (tutor principal))
     (map-get? tutors tutor)
 )
@@ -372,6 +462,18 @@
 
 (define-read-only (get-next-session-id)
     (var-get next-session-id)
+)
+
+(define-read-only (get-slot (slot-id uint))
+    (map-get? tutor-slots slot-id)
+)
+
+(define-read-only (get-slot-occurrence-bookings (slot-id uint) (occurrence-start uint))
+    (map-get? slot-occurrence-bookings { slot-id: slot-id, occurrence-start: occurrence-start })
+)
+
+(define-read-only (get-session-slot (session-id uint))
+    (map-get? session-slots session-id)
 )
 
 (define-read-only (calculate-session-cost (duration uint) (hourly-rate uint))
